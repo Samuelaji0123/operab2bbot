@@ -37,7 +37,6 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 # ---------------------------------------------------------------------------
 # CURRENCY CONVERTER
-# Uses open.er-api.com — free, no API key, covers ~160 currencies.
 # ---------------------------------------------------------------------------
 
 EXCHANGE_RATE_URL = "https://open.er-api.com/v6/latest/{base}"
@@ -133,11 +132,6 @@ async def natural_language_convert(update: Update, context: ContextTypes.DEFAULT
 
 # ---------------------------------------------------------------------------
 # PLAGIARISM / WEB SIMILARITY CHECKER
-#
-# HONESTY NOTE: no free API gives true, comprehensive plagiarism detection.
-# This checker approximates it: it breaks submitted text into sentences,
-# searches the web for each one via Serper.dev, and flags sentences that
-# appear to match indexed web pages.
 # ---------------------------------------------------------------------------
 
 SERPER_URL = "https://google.serper.dev/search"
