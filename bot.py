@@ -41,8 +41,8 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 # ---------------------------------------------------------------------------
 # CURRENCY CONVERTER
-# Uses open.er-api.com — free, no API key, no rate limits, covers ~160
-# currencies including ones the ECB-backed Frankfurter API doesn't (e.g. NGN).
+# Uses open.er-api.com — free, no API key, covers ~160 currencies including
+# ones the ECB-backed Frankfurter API doesn't (e.g. NGN).
 # ---------------------------------------------------------------------------
 
 EXCHANGE_RATE_URL = "https://open.er-api.com/v6/latest/{base}"
@@ -96,7 +96,8 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError as e:
         await update.message.reply_text(str(e))
         return
-    except requests.RequestException:
+    except requests.RequestException as e:
+        logger.error(f"Currency API request failed: {e}")
         await update.message.reply_text(
             "Currency service is temporarily unavailable. Try again shortly."
         )
@@ -121,6 +122,7 @@ async def natural_language_convert(update: Update, context: ContextTypes.DEFAULT
         amount = float(amount_str.replace(",", ""))
         result = convert_currency(amount, base, target)
     except (ValueError, requests.RequestException) as e:
+        logger.error(f"Currency conversion failed: {e}")
         await update.message.reply_text(f"Couldn't convert that: {e}")
         return True
 
@@ -161,3 +163,133 @@ def search_snippet_match(sentence: str) -> dict | None:
 
     try:
         resp = requests.post(SERPER_URL, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.error(f"Serper API request failed: {e}")
+        return None
+
+    organic = data.get("organic", [])
+    if not organic:
+        return None
+
+    top = organic[0]
+    return {
+        "sentence": sentence,
+        "source_title": top.get("title"),
+        "source_link": top.get("link"),
+    }
+
+
+async def plagiarism_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not SERPER_API_KEY:
+        await update.message.reply_text(
+            "Plagiarism checking isn't configured yet.\n\n"
+            "This feature needs a free Serper.dev API key (2,500 free "
+            "searches/month) set as the SERPER_API_KEY environment variable. "
+            "Get one at https://serper.dev, then add it in Railway's "
+            "Variables tab and redeploy."
+        )
+        return
+
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /plagiarism <text to check>\n\n"
+            "Note: this checks each sentence against Google search results. "
+            "It catches text copied verbatim from indexed web pages, but "
+            "isn't a substitute for a full plagiarism-detection service."
+        )
+        return
+
+    await run_plagiarism_check(update, text)
+
+
+async def run_plagiarism_check(update: Update, text: str):
+    sentences = split_into_sentences(text)
+    if not sentences:
+        await update.message.reply_text(
+            "Text is too short to check meaningfully — try at least one full sentence."
+        )
+        return
+
+    await update.message.reply_text(
+        f"Checking {len(sentences)} sentence(s) against the web... this may take a moment."
+    )
+
+    matches = []
+    checked = 0
+    for sentence in sentences[:20]:
+        result = search_snippet_match(sentence)
+        checked += 1
+        if result:
+            matches.append(result)
+
+    if not matches:
+        await update.message.reply_text(
+            f"✅ No exact matches found for {checked} sentence(s) checked.\n"
+            "Note: this only detects text copied verbatim and indexed by "
+            "Google — paraphrased plagiarism or unindexed sources won't be caught."
+        )
+        return
+
+    score = round(100 * len(matches) / checked)
+    lines = [f"⚠️ Possible matches found — {score}% of checked sentences flagged:\n"]
+    for m in matches[:10]:
+        lines.append(f"• \"{m['sentence'][:80]}...\"")
+        lines.append(f"  ↳ {m['source_title']}\n  {m['source_link']}\n")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# GENERAL
+# ---------------------------------------------------------------------------
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Hi, I'm @operab2bbot!\n\n"
+        "💱 Currency conversion\n"
+        "   /convert 100 USD EUR\n"
+        "   or just type: 100 usd to eur\n\n"
+        "📝 Plagiarism / similarity check\n"
+        "   /plagiarism <your text>\n"
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_command(update, context)
+
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    handled = await natural_language_convert(update, context)
+    if not handled:
+        await update.message.reply_text(
+            "I didn't catch that. Try:\n"
+            "• 100 usd to eur\n"
+            "• /plagiarism <text>\n"
+            "• /help"
+        )
+
+
+def main():
+    if not BOT_TOKEN:
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN environment variable is not set. "
+            "Set it in Railway's Variables tab (or locally before running)."
+        )
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("convert", convert_command))
+    app.add_handler(CommandHandler("plagiarism", plagiarism_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
+    logger.info("operab2bbot starting...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
