@@ -5,10 +5,6 @@ Features: Currency conversion + plagiarism (web similarity) checking
 Environment variables (set these in Railway's Variables tab):
     TELEGRAM_BOT_TOKEN   -> from @BotFather
     SERPER_API_KEY       -> optional, from https://serper.dev (free tier: 2500 searches/month)
-                             Powers the plagiarism/similarity checker.
-                             If not set, /plagiarism will tell users the
-                             feature isn't configured yet — currency
-                             conversion works fine without it.
 
 Run locally:
     pip install -r requirements.txt
@@ -20,7 +16,7 @@ Run locally:
 import os
 import re
 import logging
-import requests
+import httpx
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -41,8 +37,7 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 # ---------------------------------------------------------------------------
 # CURRENCY CONVERTER
-# Uses open.er-api.com — free, no API key, covers ~160 currencies including
-# ones the ECB-backed Frankfurter API doesn't (e.g. NGN).
+# Uses open.er-api.com — free, no API key, covers ~160 currencies.
 # ---------------------------------------------------------------------------
 
 EXCHANGE_RATE_URL = "https://open.er-api.com/v6/latest/{base}"
@@ -53,9 +48,10 @@ CURRENCY_PATTERN = re.compile(
 )
 
 
-def convert_currency(amount: float, base: str, target: str) -> dict:
+async def convert_currency(amount: float, base: str, target: str) -> dict:
     url = EXCHANGE_RATE_URL.format(base=base.upper())
-    resp = requests.get(url, timeout=10)
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url)
     resp.raise_for_status()
     data = resp.json()
 
@@ -92,11 +88,11 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        result = convert_currency(amount, base, target)
+        result = await convert_currency(amount, base, target)
     except ValueError as e:
         await update.message.reply_text(str(e))
         return
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Currency API request failed: {e}")
         await update.message.reply_text(
             "Currency service is temporarily unavailable. Try again shortly."
@@ -120,8 +116,8 @@ async def natural_language_convert(update: Update, context: ContextTypes.DEFAULT
     amount_str, base, target = match.groups()
     try:
         amount = float(amount_str.replace(",", ""))
-        result = convert_currency(amount, base, target)
-    except (ValueError, requests.RequestException) as e:
+        result = await convert_currency(amount, base, target)
+    except (ValueError, httpx.HTTPError) as e:
         logger.error(f"Currency conversion failed: {e}")
         await update.message.reply_text(f"Couldn't convert that: {e}")
         return True
@@ -138,11 +134,10 @@ async def natural_language_convert(update: Update, context: ContextTypes.DEFAULT
 # ---------------------------------------------------------------------------
 # PLAGIARISM / WEB SIMILARITY CHECKER
 #
-# HONESTY NOTE: no free API gives true, comprehensive plagiarism detection
-# (that needs a massive proprietary indexed corpus, like Turnitin has). This
-# checker approximates it: it breaks submitted text into sentences, searches
-# the web for each one via Serper.dev (free tier: 2500 searches/month), and
-# flags sentences that appear to match indexed web pages.
+# HONESTY NOTE: no free API gives true, comprehensive plagiarism detection.
+# This checker approximates it: it breaks submitted text into sentences,
+# searches the web for each one via Serper.dev, and flags sentences that
+# appear to match indexed web pages.
 # ---------------------------------------------------------------------------
 
 SERPER_URL = "https://google.serper.dev/search"
@@ -153,7 +148,7 @@ def split_into_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if len(s.strip().split()) >= 6]
 
 
-def search_snippet_match(sentence: str) -> dict | None:
+async def search_snippet_match(client: httpx.AsyncClient, sentence: str) -> dict | None:
     if not SERPER_API_KEY:
         return None
 
@@ -162,10 +157,10 @@ def search_snippet_match(sentence: str) -> dict | None:
     payload = {"q": query, "num": 3}
 
     try:
-        resp = requests.post(SERPER_URL, json=payload, headers=headers, timeout=10)
+        resp = await client.post(SERPER_URL, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Serper API request failed: {e}")
         return None
 
@@ -209,7 +204,8 @@ async def run_plagiarism_check(update: Update, text: str):
     sentences = split_into_sentences(text)
     if not sentences:
         await update.message.reply_text(
-            "Text is too short to check meaningfully — try at least one full sentence."
+            "Text is too short to check meaningfully — try at least one full sentence "
+            "ending in a period, so it can be split up properly."
         )
         return
 
@@ -219,11 +215,12 @@ async def run_plagiarism_check(update: Update, text: str):
 
     matches = []
     checked = 0
-    for sentence in sentences[:20]:
-        result = search_snippet_match(sentence)
-        checked += 1
-        if result:
-            matches.append(result)
+    async with httpx.AsyncClient() as client:
+        for sentence in sentences[:20]:
+            result = await search_snippet_match(client, sentence)
+            checked += 1
+            if result:
+                matches.append(result)
 
     if not matches:
         await update.message.reply_text(
